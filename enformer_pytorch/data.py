@@ -24,7 +24,7 @@ def coin_flip():
 
 # genomic function transforms
 
-seq_indices_embed = torch.zeros(256).long()
+seq_indices_embed = torch.zeros(256).float()
 seq_indices_embed[ord('a')] = 0
 seq_indices_embed[ord('c')] = 1
 seq_indices_embed[ord('g')] = 2
@@ -50,7 +50,7 @@ one_hot_embed[ord('T')] = torch.Tensor([0., 0., 0., 1.])
 one_hot_embed[ord('N')] = torch.Tensor([0., 0., 0., 0.])
 one_hot_embed[ord('.')] = torch.Tensor([0.25, 0.25, 0.25, 0.25])
 
-reverse_complement_map = torch.Tensor([3, 2, 1, 0, 4]).long()
+reverse_complement_map = torch.Tensor([3, 2, 1, 0, 4]).float()
 
 def torch_fromstring(seq_strs):
     batched = not isinstance(seq_strs, str)
@@ -61,11 +61,11 @@ def torch_fromstring(seq_strs):
 
 def str_to_seq_indices(seq_strs):
     seq_chrs = torch_fromstring(seq_strs)
-    return seq_indices_embed[seq_chrs.long()]
+    return seq_indices_embed[seq_chrs.float()]
 
 def str_to_one_hot(seq_strs):
     seq_chrs = torch_fromstring(seq_strs)
-    return one_hot_embed[seq_chrs.long()]
+    return one_hot_embed[seq_chrs.float()]
 
 def seq_indices_to_one_hot(t, padding = -1):
     is_padding = t == padding
@@ -78,7 +78,7 @@ def seq_indices_to_one_hot(t, padding = -1):
 # augmentations
 
 def seq_indices_reverse_complement(seq_indices):
-    complement = reverse_complement_map[seq_indices.long()]
+    complement = reverse_complement_map[seq_indices.float()]
     return torch.flip(complement, dims = (-1,))
 
 def one_hot_reverse_complement(one_hot):

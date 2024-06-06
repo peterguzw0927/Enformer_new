@@ -47,7 +47,8 @@ def map_values(fn, d):
 def exponential_linspace_int(start, end, num, divisible_by = 1):
     def _round(x):
         return int(round(x / divisible_by) * divisible_by)
-
+    if num==1:
+        return [end]
     base = math.exp(math.log(end / start) / (num - 1))
     return [_round(start * base**i) for i in range(num)]
 
@@ -56,9 +57,9 @@ def log(t, eps = 1e-20):
 
 # maybe sync batchnorm, for distributed training
 
-def MaybeSyncBatchnorm(is_distributed = None):
+def MaybeSyncBatchnorm(is_distributed = None):#checking if model is training over multiple device
     is_distributed = default(is_distributed, dist.is_initialized() and dist.get_world_size() > 1)
-    return nn.SyncBatchNorm if is_distributed else nn.BatchNorm1d
+    return nn.SyncBatchNorm if is_distributed else nn.BatchNorm1d #is_distributed == none
 
 # losses and metrics
 
@@ -73,7 +74,8 @@ def pearson_corr_coef(x, y, dim = 1, reduce_dims = (-1,)):
 # relative positional encoding functions
 
 def get_positional_features_exponential(positions, features, seq_len, min_half_life = 3., dtype = torch.float):
-    max_range = math.log(seq_len) / math.log(2.)
+    #max_range = math.log(seq_len) / math.log(2.)
+    max_range = 10.584962500721156
     half_life = 2 ** torch.linspace(min_half_life, max_range, features, device = positions.device)
     half_life = half_life[None, ...]
     positions = positions.abs()[..., None]
@@ -88,6 +90,7 @@ def gamma_pdf(x, concentration, rate):
     log_unnormalized_prob = torch.xlogy(concentration - 1., x) - rate * x
     log_normalization = (torch.lgamma(concentration) - concentration * torch.log(rate))
     return torch.exp(log_unnormalized_prob - log_normalization)
+
 
 def get_positional_features_gamma(positions, features, seq_len, stddev = None, start_mean = None, eps = 1e-8, dtype = torch.float):
     if not exists(stddev):
@@ -110,8 +113,8 @@ def get_positional_features_gamma(positions, features, seq_len, stddev = None, s
 def get_positional_embed(seq_len, feature_size, device, use_tf_gamma, dtype = torch.float):
     distances = torch.arange(-seq_len + 1, seq_len, device = device)
 
-    assert not use_tf_gamma or seq_len == 1536, 'if using tf gamma, only sequence length of 1536 allowed for now'
-
+    #assert not use_tf_gamma or seq_len == 1536, 'if using tf gamma, only sequence length of 1536 allowed for now'
+    seq_len == 1536
     feature_functions = [
         get_positional_features_exponential,
         get_positional_features_central_mask,
@@ -174,17 +177,17 @@ class AttentionPool(nn.Module):
         remainder = n % self.pool_size
         needs_padding = remainder > 0
 
-        if needs_padding:
-            x = F.pad(x, (0, remainder), value = 0)
-            mask = torch.zeros((b, 1, n), dtype = torch.bool, device = x.device)
-            mask = F.pad(mask, (0, remainder), value = True)
+#        if remainder>0:
+ #           x = F.pad(x, (0, remainder), value = 0)
+  #          mask = torch.zeros((b, 1, n), dtype = torch.bool, device = x.device)
+   #         mask = F.pad(mask, (0, remainder), value = True)
 
         x = self.pool_fn(x)
         logits = self.to_attn_logits(x)
 
-        if needs_padding:
-            mask_value = -torch.finfo(logits.dtype).max
-            logits = logits.masked_fill(self.pool_fn(mask), mask_value)
+    #    if remainder>0:
+     #       mask_value = -torch.finfo(logits.dtype).max
+      #      logits = logits.masked_fill(self.pool_fn(mask), mask_value)
 
         attn = logits.softmax(dim = -1)
 
@@ -201,24 +204,48 @@ class TargetLengthCrop(nn.Module):
         if target_len == -1:
             return x
 
-        if seq_len < target_len:
-            raise ValueError(f'sequence length {seq_len} is less than target length {target_len}')
+        #if seq_len < target_len:
+            #raise ValueError(f'sequence length {seq_len} is less than target length {target_len}')
 
         trim = (target_len - seq_len) // 2
 
-        if trim == 0:
-            return x
+        #if trim == 0:
+         #   return x
 
         return x[:, -trim:trim]
 
+class PrintModule(nn.Module):
+    def __init__(self,prefix):
+        super().__init__()
+        self.prefix = prefix
+    def forward(self,x):
+        print(self.prefix,x.shape)
+
+        return x
+
 def ConvBlock(dim, dim_out = None, kernel_size = 1, is_distributed = None):
     batchnorm_klass = MaybeSyncBatchnorm(is_distributed = is_distributed)
+    print("Covblock dim:",dim)
+    dim_out = default(dim_out,dim)
+    interdim =dim_out //2 if dim_out>dim else dim
 
+    # if dim_out<=768:
     return nn.Sequential(
-        batchnorm_klass(dim),
+        PrintModule("Conv:ConvBlock"),
+        batchnorm_klass(dim), #batchnorm1d if distributed == False
+        PrintModule("Conv:Batchnorm"),
         GELU(),
-        nn.Conv1d(dim, default(dim_out, dim), kernel_size, padding = kernel_size // 2)
+        nn.Conv1d(dim, dim_out, kernel_size, padding = kernel_size // 2)
     )
+    # else:
+    #     return nn.Sequential(
+    #         PrintModule("Conv:ConvBlock").
+    #         batchnorm_klass(dim),
+    #         PrintModule("Conv:Batchnorm"),
+    #         GELU(),
+    #         nn.Conv1d(dim,interdim,kernel_size,padding=kernel_size//2),
+    #         nn.Conv1d(interdim,dim_out,kernel_size,padding=kernel_size//2)
+    #     )
 
 # attention classes
 
@@ -265,33 +292,33 @@ class Attention(nn.Module):
         self.use_tf_gamma = use_tf_gamma
 
     def forward(self, x):
-        n, h, device = x.shape[-2], self.heads, x.device
+         n, h, device = x.shape[-2], self.heads, x.device
 
-        q = self.to_q(x)
-        k = self.to_k(x)
-        v = self.to_v(x)
+         q = self.to_q(x)
+         k = self.to_k(x)
+         v = self.to_v(x)
 
-        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
+         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
 
-        q = q * self.scale
+         q = q * self.scale
 
-        content_logits = einsum('b h i d, b h j d -> b h i j', q + self.rel_content_bias, k)
+         content_logits = einsum('b h i d, b h j d -> b h i j', q + self.rel_content_bias, k)
 
-        positions = get_positional_embed(n, self.num_rel_pos_features, device, use_tf_gamma = self.use_tf_gamma, dtype = self.to_rel_k.weight.dtype)
-        positions = self.pos_dropout(positions)
-        rel_k = self.to_rel_k(positions)
+         positions = get_positional_embed(n, self.num_rel_pos_features, device, use_tf_gamma = self.use_tf_gamma, dtype = self.to_rel_k.weight.dtype)
+         positions = self.pos_dropout(positions)
+         rel_k = self.to_rel_k(positions)
 
-        rel_k = rearrange(rel_k, 'n (h d) -> h n d', h = h)
-        rel_logits = einsum('b h i d, h j d -> b h i j', q + self.rel_pos_bias, rel_k)
-        rel_logits = relative_shift(rel_logits)
+         rel_k = rearrange(rel_k, 'n (h d) -> h n d', h = h)
+         rel_logits = einsum('b h i d, h j d -> b h i j', q + self.rel_pos_bias, rel_k)
+         rel_logits = relative_shift(rel_logits)
 
-        logits = content_logits + rel_logits
-        attn = logits.softmax(dim = -1)
-        attn = self.attn_dropout(attn)
+         logits = content_logits + rel_logits
+         attn = logits.softmax(dim = -1)
+         attn = self.attn_dropout(attn)
 
-        out = einsum('b h i j, b h j d -> b h i d', attn, v)
-        out = rearrange(out, 'b h n d -> b n (h d)')
-        return self.to_out(out)
+         out = einsum('b h i j, b h j d -> b h i d', attn, v)
+         out = rearrange(out, 'b h n d -> b n (h d)')
+         return self.to_out(out)
 
 # main class
 
@@ -312,21 +339,27 @@ class Enformer(PreTrainedModel):
         # create stem
 
         self.stem = nn.Sequential(
-            nn.Conv1d(4, half_dim, 15, padding = 7),
+            PrintModule("stem: stem"),
+            nn.Conv1d(4, half_dim, 15, padding = 7),#start with just nn cov1d, then go to stem
+            PrintModule("stem: Conv1d"),
             Residual(ConvBlock(half_dim)),
+            PrintModule("stem: Residul"),
             AttentionPool(half_dim, pool_size = 2)
         )
-
         # create conv tower
 
         filter_list = exponential_linspace_int(half_dim, config.dim, num = (config.num_downsamples - 1), divisible_by = config.dim_divisible_by)
         filter_list = [half_dim, *filter_list]
 
         conv_layers = []
+        print("Filter list",filter_list)
         for dim_in, dim_out in zip(filter_list[:-1], filter_list[1:]):
             conv_layers.append(nn.Sequential(
+                PrintModule("Conv_layer:start"),
                 ConvBlock(dim_in, dim_out, kernel_size = 5),
+                PrintModule("Conv_layer:ConvBlock"),
                 Residual(ConvBlock(dim_out, dim_out, 1)),
+                PrintModule("Conv_layer:Residual"),
                 AttentionPool(dim_out, pool_size = 2)
             ))
 
@@ -374,10 +407,12 @@ class Enformer(PreTrainedModel):
         self.crop_final = TargetLengthCrop(config.target_length)
 
         # final pointwise
-
+        # print("flist: ",filter_list)
         self.final_pointwise = nn.Sequential(
             Rearrange('b n d -> b d n'),
-            ConvBlock(filter_list[-1], twice_dim, 1),
+            PrintModule("Final: Conv"),
+            ConvBlock(filter_list[0], twice_dim, 1), #should be filter_list[-1] for config_number >2, if config==2 then filter_list[0]
+            PrintModule("Final: Conv finished"),
             Rearrange('b d n -> b n d'),
             nn.Dropout(config.dropout_rate / 8),
             GELU()
@@ -386,13 +421,17 @@ class Enformer(PreTrainedModel):
         # create trunk sequential module
 
         self._trunk = nn.Sequential(
+            PrintModule("Trunk:"),
             Rearrange('b n d -> b d n'),
             self.stem,
-            self.conv_tower,
+            PrintModule("Trunk:Rearrange"),
+            # self.conv_tower,
+            PrintModule("Trunk:Conv_tower"),
             Rearrange('b d n -> b n d'),
-            self.transformer,
+            # self.transformer,#cause problem
             self.crop_final,
-            self.final_pointwise
+            self.final_pointwise,
+            PrintModule("Trunk:Finished")
         )
 
         # create final heads for human and mouse
@@ -443,48 +482,51 @@ class Enformer(PreTrainedModel):
         head = None,
         target_length = None
     ):
-        if isinstance(x, list):
-            x = str_to_one_hot(x)
+        # if isinstance(x, list):
+        #     print(f"isinstance, x type before{type(x)}")
+        #     x = str_to_one_hot(x)
+        #     print(f"\n x type after{type(x)}")
 
-        elif type(x) == torch.Tensor and x.dtype == torch.long:
-            x = seq_indices_to_one_hot(x)
-        x.to(self.device)
+        # elif type(x) == torch.Tensor and x.dtype == torch.long:
+        #     x = seq_indices_to_one_hot(x)
+        #     print(f"x type after{type(x)}")
+        # x.to(self.device)
 
-        no_batch = x.ndim == 2
+        # no_batch = x.ndim == 2
 
-        if no_batch:
-            x = rearrange(x, '... -> () ...')
+        # if no_batch:
+        #    x = rearrange(x, '... -> () ...')
 
-        if exists(target_length):
-            self.set_target_length(target_length)
+        # if exists(target_length):
+        #    self.set_target_length(target_length)
 
         trunk_fn = self.trunk_checkpointed if self.use_checkpointing else self._trunk
-        x = trunk_fn(x)
+        x = self._trunk(x)
+        # print(self.dim//2)#768
+        # x = x.reshape(256,3072)
 
-        if no_batch:
-            x = rearrange(x, '() ... -> ...')
+        # if no_batch:
+        #     x = rearrange(x, '() ... -> ...')
 
-        if return_only_embeddings:
-            return x
+        # if return_only_embeddings:
+        #     return x
 
-        out = map_values(lambda fn: fn(x), self._heads)
+        # out = map_values(lambda fn: fn(x), self._heads)
 
-        if exists(head):
-            assert head in self._heads, f'head {head} not found'
-            out = out[head]
 
-        if exists(target):
-            assert exists(head), 'head must be passed in if one were to calculate loss directly with targets'
+        # if exists(target):
+        #     assert exists(head), 'head must be passed in if one were to calculate loss directly with targets'
 
-            if return_corr_coef:
-                return pearson_corr_coef(out, target)
+        #     if return_corr_coef:
+        #         return pearson_corr_coef(out, target)
 
-            return poisson_loss(out, target)
+        #     return poisson_loss(out, target)
 
-        if return_embeddings:
-            return out, x
+        # if return_embeddings:
+        #     return out, x
 
-        return out
+        return x
+
 
 # from pretrained function
 
