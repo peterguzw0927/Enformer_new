@@ -50,15 +50,15 @@ model.eval()
 #         return x[:,:,:,98304:]
 
 # model = Conv1DModel()#try to get con1d to work, and fix number -> try rest of trunk
-# seq = torch.randint(0, 5, (1, 196_608)) # for ACGTN, in that order (-1 for padding)
-seq = torch.ones(1,196_608, dtype=torch.long)#98304 also worked
+seq = torch.randint(0, 5, (1, 196_608)) # for ACGTN, in that order (-1 for padding)
+# seq = torch.ones(1,196_608, dtype=torch.long)#98304 also worked
 one_hot=seq_indices_to_one_hot(seq).float()
 print(one_hot.shape)
-one_hot = one_hot.reshape(1,196608,4)
+# one_hot = one_hot.reshape(1,196608,4)
 # one_hot_t = one_hot.transpose(1,3)# 1,4,1,196608
 # one_hot = torch.rand(1,196_608,768)
 output = model(one_hot)
-print(output.shape)
+# print(output.shape)
 
 # humanoutput = output['human'] # (1, 896, 5313)
 # mouseoutput = output['mouse'] # (1, 896, 1643)

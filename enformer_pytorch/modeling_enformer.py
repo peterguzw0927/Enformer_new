@@ -219,7 +219,7 @@ class PrintModule(nn.Module):
         super().__init__()
         self.prefix = prefix
     def forward(self,x):
-        print(self.prefix,x.shape)
+        print("Print Module: ",self.prefix,x.shape)
 
         return x
 
@@ -358,7 +358,7 @@ class Enformer(PreTrainedModel):
                 PrintModule("Conv_layer:start"),
                 ConvBlock(dim_in, dim_out, kernel_size = 5),
                 PrintModule("Conv_layer:ConvBlock"),
-                Residual(ConvBlock(dim_out, dim_out, 1)),
+                # Residual(ConvBlock(dim_out, dim_out, 1)),
                 PrintModule("Conv_layer:Residual"),
                 AttentionPool(dim_out, pool_size = 2)
             ))
@@ -411,7 +411,7 @@ class Enformer(PreTrainedModel):
         self.final_pointwise = nn.Sequential(
             Rearrange('b n d -> b d n'),
             PrintModule("Final: Conv"),
-            ConvBlock(filter_list[0], twice_dim, 1), #should be filter_list[-1] for config_number >2, if config==2 then filter_list[0]
+            ConvBlock(filter_list[-1], twice_dim, 1), #should be filter_list[-1] for config_number >2, if config==2 then filter_list[0]
             PrintModule("Final: Conv finished"),
             Rearrange('b d n -> b n d'),
             nn.Dropout(config.dropout_rate / 8),
@@ -425,10 +425,10 @@ class Enformer(PreTrainedModel):
             Rearrange('b n d -> b d n'),
             self.stem,
             PrintModule("Trunk:Rearrange"),
-            # self.conv_tower,
+            self.conv_tower,
             PrintModule("Trunk:Conv_tower"),
             Rearrange('b d n -> b n d'),
-            # self.transformer,#cause problem
+            # self.transformer,#layer normalization is not implemented
             self.crop_final,
             self.final_pointwise,
             PrintModule("Trunk:Finished")
