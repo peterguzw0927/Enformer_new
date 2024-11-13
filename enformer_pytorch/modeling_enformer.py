@@ -41,8 +41,8 @@ def always(val):
         return val
     return inner
 
-def map_values(fn, d):
-    return {key: fn(values) for key, values in d.items()}
+def map_values(fn, d):# maps a function over the values in the dictionary, leaving keys unchanged
+    return {key: fn(values) for key, values in d.items()} # for each key, apply fn(values)
 
 def exponential_linspace_int(start, end, num, divisible_by = 1):
     def _round(x):
@@ -146,6 +146,25 @@ def relative_shift(x):
     return x[..., :((t2 + 1) // 2)]
 
 # classes
+class LayerNormalization(nn.Module):
+    def __init__(self, dim, epsilon=1e-6):
+        super(LayerNormalization, self).__init__()
+        self.epsilon = epsilon
+            # Initialize gamma and beta as trainable parameters
+        self.gamma = nn.Parameter(torch.ones(dim))
+        self.beta = nn.Parameter(torch.zeros(dim))
+
+    def forward(self, x):
+        # Calculate mean and variance along the last dimension
+        mean = x.mean(dim=-1, keepdim=True)
+        variance = ((x - mean) ** 2).mean(dim=-1, keepdim=True)
+
+    # Normalize the input
+        normalized_x = (x - mean) / torch.sqrt(variance + self.epsilon)
+
+# Apply scaling (gamma) and shifting (beta)
+        return self.gamma * normalized_x + self.beta
+
 
 class Residual(nn.Module):
     def __init__(self, fn):
@@ -227,7 +246,7 @@ def ConvBlock(dim, dim_out = None, kernel_size = 1, is_distributed = None):
     batchnorm_klass = MaybeSyncBatchnorm(is_distributed = is_distributed)
     print("Covblock dim:",dim)
     dim_out = default(dim_out,dim)
-    interdim =dim_out //2 if dim_out>dim else dim
+    # interdim =dim_out //2 if dim_out>dim else dim
 
     # if dim_out<=768:
     return nn.Sequential(
@@ -292,32 +311,59 @@ class Attention(nn.Module):
         self.use_tf_gamma = use_tf_gamma
 
     def forward(self, x):
-         n, h, device = x.shape[-2], self.heads, x.device
+         # n, h, device = x.shape[-2], self.heads, x.device
 
-         q = self.to_q(x)
+         # q = self.to_q(x)
+         # k = self.to_k(x)
+         # v = self.to_v(x)
+
+         # q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
+         # print('shape of x:',x.shape) # 1,49152,1536
+         batch_size = x.shape[0]
+         device = x.device
+         n = x.shape[-2] #49152
+         h = self.heads #8
+         # print("n is :",n)
+         # print("number of heads" ,h)
+         # Query, Key, Value projections
+         q = self.to_q(x) #1, 49152, 512
+         # print('q shape:',q.shape)
+         q = q.reshape(batch_size, h, n, -1)
          k = self.to_k(x)
+         k = k.view(batch_size, h, n, -1)
          v = self.to_v(x)
-
-         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
+         v = v.view(batch_size, h, n, -1)
+         d = v.shape[3]
+         # print('self.q shape:',self.to_q(x))
+         # print('q shape:',q.shape) #1,8,48152,64
 
          q = q * self.scale
 
-         content_logits = einsum('b h i d, b h j d -> b h i j', q + self.rel_content_bias, k)
+         # content_logits = einsum('b h i d, b h j d -> b h i j', q + self.rel_content_bias, k)
+         content_logits = torch.matmul(q + self.rel_content_bias, k.transpose(-2, -1)) # 1,8,1536,1536
+         # print('content logits shape: ',content_logits.shape)
 
          positions = get_positional_embed(n, self.num_rel_pos_features, device, use_tf_gamma = self.use_tf_gamma, dtype = self.to_rel_k.weight.dtype)
          positions = self.pos_dropout(positions)
-         rel_k = self.to_rel_k(positions)
+         rel_k = self.to_rel_k(positions) #3071,512
+         n = rel_k.shape[-2]
+         # print("rel_k shape:",rel_k.shape)
 
-         rel_k = rearrange(rel_k, 'n (h d) -> h n d', h = h)
-         rel_logits = einsum('b h i d, h j d -> b h i j', q + self.rel_pos_bias, rel_k)
+         # rel_k = rearrange(rel_k, 'n (h d) -> h n d', h = h)
+         rel_k = rel_k.view(self.heads, n, -1)
+         rel_logits = torch.matmul(q + self.rel_pos_bias, rel_k.transpose(-2, -1))
+         # rel_logits = einsum('b h i d, h j d -> b h i j', q + self.rel_pos_bias, rel_k)
          rel_logits = relative_shift(rel_logits)
 
          logits = content_logits + rel_logits
          attn = logits.softmax(dim = -1)
          attn = self.attn_dropout(attn)
 
-         out = einsum('b h i j, b h j d -> b h i d', attn, v)
-         out = rearrange(out, 'b h n d -> b n (h d)')
+         # out = einsum('b h i j, b h j d -> b h i d', attn, v)
+         out = torch.matmul(attn,v)
+         n=out.shape[-2]
+         # out = rearrange(out, 'b h n d -> b n (h d)')
+         out = out.transpose(1,2).reshape(batch_size,n,-1)
          return self.to_out(out)
 
 # main class
@@ -335,6 +381,7 @@ class Enformer(PreTrainedModel):
         self.dim = config.dim
         half_dim = config.dim // 2
         twice_dim = config.dim * 2
+
 
         # create stem
 
@@ -358,7 +405,7 @@ class Enformer(PreTrainedModel):
                 PrintModule("Conv_layer:start"),
                 ConvBlock(dim_in, dim_out, kernel_size = 5),
                 PrintModule("Conv_layer:ConvBlock"),
-                # Residual(ConvBlock(dim_out, dim_out, 1)),
+                Residual(ConvBlock(dim_out, dim_out, 1)),
                 PrintModule("Conv_layer:Residual"),
                 AttentionPool(dim_out, pool_size = 2)
             ))
@@ -376,7 +423,8 @@ class Enformer(PreTrainedModel):
         for _ in range(config.depth):
             transformer.append(nn.Sequential(
                 Residual(nn.Sequential(
-                    nn.LayerNorm(config.dim),
+                    LayerNormalization(config.dim),
+                    # nn.LayerNorm(config.dim),
                     Attention(
                         config.dim,
                         heads = config.heads,
@@ -390,7 +438,8 @@ class Enformer(PreTrainedModel):
                     nn.Dropout(config.dropout_rate)
                 )),
                 Residual(nn.Sequential(
-                    nn.LayerNorm(config.dim),
+                    LayerNormalization(config.dim),
+                    # nn.LayerNorm(config.dim),
                     nn.Linear(config.dim, config.dim * 2),
                     nn.Dropout(config.dropout_rate),
                     nn.ReLU(),
@@ -428,7 +477,7 @@ class Enformer(PreTrainedModel):
             self.conv_tower,
             PrintModule("Trunk:Conv_tower"),
             Rearrange('b d n -> b n d'),
-            # self.transformer,#layer normalization is not implemented
+            self.transformer,#layer normalization is not implemented
             self.crop_final,
             self.final_pointwise,
             PrintModule("Trunk:Finished")
@@ -438,14 +487,14 @@ class Enformer(PreTrainedModel):
 
         self.add_heads(**config.output_heads)
 
-        # use checkpointing on transformer trunk
+                # use checkpointing on transformer trunk
 
         self.use_checkpointing = config.use_checkpointing
 
     def add_heads(self, **kwargs):
         self.output_heads = kwargs
 
-        self._heads = nn.ModuleDict(map_values(lambda features: nn.Sequential(
+        self._heads = nn.ModuleDict(map_values(lambda features: nn.Sequential(# initializes self.heads as a ModuleDict(dict like container)
             nn.Linear(self.dim * 2, features),
             nn.Softplus()
         ), kwargs))
@@ -511,8 +560,12 @@ class Enformer(PreTrainedModel):
         # if return_only_embeddings:
         #     return x
 
-        # out = map_values(lambda fn: fn(x), self._heads)
+        out = map_values(lambda fn: fn(x), self._heads) #is applying each "head" in self._heads to an input x.
 
+
+        if exists(head):
+            assert head in self._heads, f'head {head} not found'
+            out = out[head]
 
         # if exists(target):
         #     assert exists(head), 'head must be passed in if one were to calculate loss directly with targets'
@@ -525,7 +578,7 @@ class Enformer(PreTrainedModel):
         # if return_embeddings:
         #     return out, x
 
-        return x
+        return out
 
 
 # from pretrained function
