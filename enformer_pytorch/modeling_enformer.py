@@ -244,15 +244,15 @@ class PrintModule(nn.Module):
 
 def ConvBlock(dim, dim_out = None, kernel_size = 1, is_distributed = None):
     batchnorm_klass = MaybeSyncBatchnorm(is_distributed = is_distributed)
-    print("Covblock dim:",dim)
+    # print("Covblock dim:",dim)
     dim_out = default(dim_out,dim)
     # interdim =dim_out //2 if dim_out>dim else dim
 
     # if dim_out<=768:
     return nn.Sequential(
-        PrintModule("Conv:ConvBlock"),
+        # PrintModule("Conv:ConvBlock"),
         batchnorm_klass(dim), #batchnorm1d if distributed == False
-        PrintModule("Conv:Batchnorm"),
+        # PrintModule("Conv:Batchnorm"),
         GELU(),
         nn.Conv1d(dim, dim_out, kernel_size, padding = kernel_size // 2)
     )
@@ -304,20 +304,20 @@ class Attention(nn.Module):
         # dropouts
 
         self.pos_dropout = nn.Dropout(pos_dropout)
-        self.attn_dropout = nn.Dropout(dropout)
+        self.attn_dropout = nn.Dropout(dropout)#different!!! 
 
         # whether to use tf gamma
 
         self.use_tf_gamma = use_tf_gamma
 
     def forward(self, x):
-         # n, h, device = x.shape[-2], self.heads, x.device
+         n, h, device = x.shape[-2], self.heads, x.device
 
-         # q = self.to_q(x)
-         # k = self.to_k(x)
-         # v = self.to_v(x)
+         q = self.to_q(x)
+         k = self.to_k(x)
+         v = self.to_v(x)
 
-         # q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
+         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v)) #how to rewrite this?? b n (h d) ->(reshape) b n h d ->transpose b h n d
          # print('shape of x:',x.shape) # 1,49152,1536
          batch_size = x.shape[0]
          device = x.device
@@ -328,41 +328,46 @@ class Attention(nn.Module):
          # Query, Key, Value projections
          q = self.to_q(x) #1, 49152, 512
          # print('q shape:',q.shape)
-         q = q.reshape(batch_size, h, n, -1)
+         q = q.reshape(batch_size, n,h, -1)
+         q = q.transpose(1,2)
          k = self.to_k(x)
-         k = k.view(batch_size, h, n, -1)
+         k = k.reshape(batch_size,n, h, -1)
+         k = k.transpose(1,2)
          v = self.to_v(x)
-         v = v.view(batch_size, h, n, -1)
+         v = v.reshape(batch_size,n, h, -1)
+         v = v.transpose(1,2)
          d = v.shape[3]
-         # print('self.q shape:',self.to_q(x))
-         # print('q shape:',q.shape) #1,8,48152,64
+        #  print('self.q shape:',self.to_q(x))
+        #  print('q shape:',q.shape) #1,8,48152,64
 
          q = q * self.scale
 
-         # content_logits = einsum('b h i d, b h j d -> b h i j', q + self.rel_content_bias, k)
+        #  content_logits = einsum('b h i d, b h j d -> b h i j', q + self.rel_content_bias, k)
          content_logits = torch.matmul(q + self.rel_content_bias, k.transpose(-2, -1)) # 1,8,1536,1536
          # print('content logits shape: ',content_logits.shape)
 
          positions = get_positional_embed(n, self.num_rel_pos_features, device, use_tf_gamma = self.use_tf_gamma, dtype = self.to_rel_k.weight.dtype)
          positions = self.pos_dropout(positions)
-         rel_k = self.to_rel_k(positions) #3071,512
+         rel_k = self.to_rel_k(positions) #3071,512 correct
          n = rel_k.shape[-2]
          # print("rel_k shape:",rel_k.shape)
 
-         # rel_k = rearrange(rel_k, 'n (h d) -> h n d', h = h)
-         rel_k = rel_k.view(self.heads, n, -1)
-         rel_logits = torch.matmul(q + self.rel_pos_bias, rel_k.transpose(-2, -1))
-         # rel_logits = einsum('b h i d, h j d -> b h i j', q + self.rel_pos_bias, rel_k)
+        #  rel_k = rearrange(rel_k, 'n (h d) -> h n d', h = h)
+         rel_k = rel_k.reshape(n, self.heads, -1)
+         rel_k = rel_k.transpose(0,1)
+
+         rel_logits = torch.matmul(q + self.rel_pos_bias, rel_k.transpose(-2, -1))#suspectious
+        #  rel_logits = einsum('b h i d, h j d -> b h i j', q + self.rel_pos_bias, rel_k)
          rel_logits = relative_shift(rel_logits)
 
          logits = content_logits + rel_logits
          attn = logits.softmax(dim = -1)
-         attn = self.attn_dropout(attn)
+         attn = self.attn_dropout(attn)#different!!!
 
-         # out = einsum('b h i j, b h j d -> b h i d', attn, v)
+        #  out = einsum('b h i j, b h j d -> b h i d', attn, v)
          out = torch.matmul(attn,v)
          n=out.shape[-2]
-         # out = rearrange(out, 'b h n d -> b n (h d)')
+        #  out = rearrange(out, 'b h n d -> b n (h d)')
          out = out.transpose(1,2).reshape(batch_size,n,-1)
          return self.to_out(out)
 
@@ -386,11 +391,11 @@ class Enformer(PreTrainedModel):
         # create stem
 
         self.stem = nn.Sequential(
-            PrintModule("stem: stem"),
+            # PrintModule("stem: stem"),
             nn.Conv1d(4, half_dim, 15, padding = 7),#start with just nn cov1d, then go to stem
-            PrintModule("stem: Conv1d"),
+            # PrintModule("stem: Conv1d"),
             Residual(ConvBlock(half_dim)),
-            PrintModule("stem: Residul"),
+            # PrintModule("stem: Residul"),
             AttentionPool(half_dim, pool_size = 2)
         )
         # create conv tower
@@ -399,14 +404,14 @@ class Enformer(PreTrainedModel):
         filter_list = [half_dim, *filter_list]
 
         conv_layers = []
-        print("Filter list",filter_list)
+        # print("Filter list",filter_list)
         for dim_in, dim_out in zip(filter_list[:-1], filter_list[1:]):
             conv_layers.append(nn.Sequential(
-                PrintModule("Conv_layer:start"),
+                # PrintModule("Conv_layer:start"),
                 ConvBlock(dim_in, dim_out, kernel_size = 5),
-                PrintModule("Conv_layer:ConvBlock"),
+                # PrintModule("Conv_layer:ConvBlock"),
                 Residual(ConvBlock(dim_out, dim_out, 1)),
-                PrintModule("Conv_layer:Residual"),
+                # PrintModule("Conv_layer:Residual"),
                 AttentionPool(dim_out, pool_size = 2)
             ))
 
@@ -422,9 +427,9 @@ class Enformer(PreTrainedModel):
         transformer = []
         for _ in range(config.depth):
             transformer.append(nn.Sequential(
-                Residual(nn.Sequential(
-                    LayerNormalization(config.dim),
-                    # nn.LayerNorm(config.dim),
+                Residual(nn.Sequential(#problematic
+                    # LayerNormalization(config.dim),
+                    nn.LayerNorm(config.dim),#problematic? extract the module and look at the weights
                     Attention(
                         config.dim,
                         heads = config.heads,
@@ -435,11 +440,11 @@ class Enformer(PreTrainedModel):
                         num_rel_pos_features = config.dim // config.heads,
                         use_tf_gamma = use_tf_gamma
                     ),
-                    nn.Dropout(config.dropout_rate)
+                    nn.Dropout(config.dropout_rate)#check dropout
                 )),
                 Residual(nn.Sequential(
-                    LayerNormalization(config.dim),
-                    # nn.LayerNorm(config.dim),
+                    # LayerNormalization(config.dim),
+                    nn.LayerNorm(config.dim),
                     nn.Linear(config.dim, config.dim * 2),
                     nn.Dropout(config.dropout_rate),
                     nn.ReLU(),
@@ -459,9 +464,9 @@ class Enformer(PreTrainedModel):
         # print("flist: ",filter_list)
         self.final_pointwise = nn.Sequential(
             Rearrange('b n d -> b d n'),
-            PrintModule("Final: Conv"),
+            # PrintModule("Final: Conv"),
             ConvBlock(filter_list[-1], twice_dim, 1), #should be filter_list[-1] for config_number >2, if config==2 then filter_list[0]
-            PrintModule("Final: Conv finished"),
+            # PrintModule("Final: Conv finished"),
             Rearrange('b d n -> b n d'),
             nn.Dropout(config.dropout_rate / 8),
             GELU()
@@ -470,17 +475,17 @@ class Enformer(PreTrainedModel):
         # create trunk sequential module
 
         self._trunk = nn.Sequential(
-            PrintModule("Trunk:"),
+            # PrintModule("Trunk:"),
             Rearrange('b n d -> b d n'),
             self.stem,
-            PrintModule("Trunk:Rearrange"),
+            # PrintModule("Trunk:Rearrange"),
             self.conv_tower,
-            PrintModule("Trunk:Conv_tower"),
+            # PrintModule("Trunk:Conv_tower"),
             Rearrange('b d n -> b n d'),
-            self.transformer,#layer normalization is not implemented
+            self.transformer,#problematic
             self.crop_final,
             self.final_pointwise,
-            PrintModule("Trunk:Finished")
+            # PrintModule("Trunk:Finished")
         )
 
         # create final heads for human and mouse
@@ -550,7 +555,9 @@ class Enformer(PreTrainedModel):
         #    self.set_target_length(target_length)
 
         trunk_fn = self.trunk_checkpointed if self.use_checkpointing else self._trunk
+        # print("Input of my enformer is:",x)
         x = self._trunk(x)
+        # print("Output of my enformer is:",x)
         # print(self.dim//2)#768
         # x = x.reshape(256,3072)
 
